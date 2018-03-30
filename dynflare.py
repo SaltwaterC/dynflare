@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 
 import argparse, os, sys, json
+from ConfigParser import ConfigParser
+from StringIO import StringIO
 from dnslib import DNSRecord
 from publicsuffix import PublicSuffixList
 from cfpy import CFapi
@@ -9,7 +11,7 @@ from cfpy import CFapi
 def my_ip():
   hostname = "myip.opendns.com"
   server = "resolver1.opendns.com"
-  
+
   question = DNSRecord.question(hostname).send(server)
   return DNSRecord.parse(question).short()
 
@@ -25,7 +27,7 @@ def upsert_record(psl, cf, host):
   ip = my_ip()
   domain = psl.get_public_suffix(host)
   zid = zone_id(cf, domain)
-  
+
   try:
     rinf = record_info(cf, zid, host)
     if rinf["content"] != ip:
@@ -39,12 +41,12 @@ def upsert_record(psl, cf, host):
         "ttl": 120
       }
       cf.api_request(path, data = data, method = "PUT")
-      print "Updated " + host + " with content " + ip
+      print("Updated " + host + " with content " + ip)
     else:
-      print "Host " + host + " is already up to date with " + ip
+      print("Host " + host + " is already up to date with " + ip)
   except IndexError:
     cf.create_dns_record(zid, "A", host, ip, 120)
-    print "Created " + host + " with content " + ip
+    print("Created " + host + " with content " + ip)
 
 # arguments
 parser = argparse.ArgumentParser(
@@ -77,9 +79,25 @@ parser.add_argument(
   type = str,
   help = "CloudFlare API token / key"
 )
+parser.add_argument(
+  "--conf",
+  dest = "conf",
+  type = str,
+  help = ("Configuration file containing EMAIL and TKN using same syntax as "
+  "the Certbot CloudFlare plug-in")
+)
 args = parser.parse_args()
 
 # implementation
+if args.conf:
+  cfg = ConfigParser()
+  with open(os.path.expanduser(args.conf)) as stream:
+    # workaround ConfigParser's deficiency
+    stream = StringIO("[default]\n" + stream.read())
+    cfg.readfp(stream)
+  os.environ["CF_EMAIL"] = cfg.get("default", "dns_cloudflare_email")
+  os.environ["CF_TKN"] = cfg.get("default", "dns_cloudflare_api_key")
+
 email = os.environ.get("CF_EMAIL")
 email = args.email if type(args.email) is not type(None) else email
 if type(email) is type(None):
