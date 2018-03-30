@@ -4,7 +4,7 @@ Dynamic DNS script built on top of the CloudFlare API.
 
 ## Requirements
 
- * Python 2.7+ (Python 3 is untested, although it may work)
+ * Python 2.7+
  * dnslib
  * publicsuffix2
  * cfpy
