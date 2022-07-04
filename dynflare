@@ -109,7 +109,7 @@ if args.conf:
   cfg = ConfigParser()
   with open(os.path.expanduser(args.conf)) as stream:
     # workaround ConfigParser's deficiency
-    stream = StringIO("[default]\n" + stream.read())
+    stream = StringIO(u"[default]\n" + stream.read())
     try:
       cfg.read_file(stream)
     except AttributeError: # Python 2 fallback
