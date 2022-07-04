@@ -1,4 +1,3 @@
 dnslib
 publicsuffix2
-cfpy
-requests
+cloudflare
