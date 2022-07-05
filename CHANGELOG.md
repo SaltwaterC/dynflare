@@ -4,6 +4,7 @@
  * Supports Python 3 with Python 2 fallback.
  * Supports Cloudflare (scoped bearer) API tokens.
  * Adds output timestamps.
+ * Add support for pre-filling Cloudflare Zone ID to save on API calls.
 
 ## v0.1
 

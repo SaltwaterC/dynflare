@@ -38,7 +38,7 @@ def my_ip():
   question = DNSRecord.question(hostname).send(server)
   return DNSRecord.parse(question).short()
 
-def zone_id(cf, domain):
+def get_zone_id(cf, domain):
   # query for the zone name and expect only one value back
   try:
     zones = cf.zones.get(params = {'name': domain, 'per_page': 1})
@@ -54,7 +54,7 @@ def zone_id(cf, domain):
   zone = zones[0]
   return zone['id']
 
-def record_info(cf, zid, host):
+def get_record_info(cf, zid, host):
   record_info = cf.zones.dns_records.get(zid, params = {'name': host, 'type': 'A'})
   return record_info[0]
 
@@ -66,13 +66,11 @@ def update_dns_record(cf, zid, rid, host, ip):
   cf.zones.dns_records.put(zid, rid, data = {'type': 'A', 'name': host, 'content': ip, 'ttl': 120})
   print('[%s] Updated %s with content %s' % (timestamp(), host, ip))
 
-def upsert_dns_record(psl, cf, host):
+def upsert_dns_record(cf, zid, host):
   ip = my_ip()
-  domain = psl.get_public_suffix(host)
-  zid = zone_id(cf, domain)
 
   try:
-    rinf = record_info(cf, zid, host)
+    rinf = get_record_info(cf, zid, host)
     if rinf['content'] != ip:
       update_dns_record(cf, zid, rinf['id'], host, ip)
     else:
@@ -91,6 +89,9 @@ parser = argparse.ArgumentParser(
     CLOUDFLARE_API_KEY. They need to be specified as arguments only
     when the environment variables are undefined or when they need to be
     overridden.
+
+    If you specify the ZONE_ID as command line argument, dynflare saves on
+    Cloudflare API calls.
   '''
 )
 parser.add_argument(
@@ -99,6 +100,12 @@ parser.add_argument(
   type = str,
   help = 'DNS hostname to update.',
   required = True
+)
+parser.add_argument(
+  '--zone-id',
+  dest = 'zone_id',
+  type = str,
+  help = 'Cloudflare Zone ID'
 )
 parser.add_argument(
   '--email',
@@ -154,4 +161,10 @@ if type(api_key) is type(None):
 
 os.environ['CLOUDFLARE_API_KEY'] = api_key
 
-upsert_dns_record(PublicSuffixList(), CloudFlare.CloudFlare(), args.host)
+cf = CloudFlare.CloudFlare()
+
+zone_id = args.zone_id
+if type(zone_id) is type(None):
+  zone_id = get_zone_id(cf, PublicSuffixList().get_public_suffix(args.host))
+
+upsert_dns_record(cf, zone_id, args.host)
