@@ -1,9 +1,8 @@
 #!/usr/bin/env python
 
 # imports
-import argparse, os, sys, CloudFlare
+import argparse, os, sys, re, random, CloudFlare
 from dnslib import DNSRecord
-from publicsuffix2 import PublicSuffixList
 from datetime import datetime, tzinfo, timedelta
 
 try:
@@ -31,107 +30,12 @@ class UTC(tzinfo):
 def timestamp():
   return datetime.now(UTC()).ctime()
 
-def my_ip():
-  hostname = 'myip.opendns.com'
-  server = 'resolver1.opendns.com'
+def get_conf_certbot(conf_certbot):
+  if type(conf_certbot) is type(None):
+    return
 
-  question = DNSRecord.question(hostname).send(server)
-  return DNSRecord.parse(question).short()
-
-def get_zone_id(cf, domain):
-  # query for the zone name and expect only one value back
-  try:
-    zones = cf.zones.get(params = {'name': domain, 'per_page': 1})
-  except CloudFlare.exceptions.CloudFlareAPIError as e:
-    sys.exit('[%s] /zones.get %d %s - api call failed' % (timestamp(), e, e))
-  except Exception as e:
-    sys.exit('[%s] /zones.get - %s - api call failed' % (timestamp(), e))
-
-  if len(zones) == 0:
-    sys.exit('[%s] No zones found' % (timestamp()))
-
-  # extract the zone_id which is needed to process that zone
-  zone = zones[0]
-  return zone['id']
-
-def get_record_info(cf, zid, host):
-  record_info = cf.zones.dns_records.get(zid, params = {'name': host, 'type': 'A'})
-  return record_info[0]
-
-def create_dns_record(cf, zid, host, ip):
-  cf.zones.dns_records.post(zid, data = {'type': 'A', 'name': host, 'content': ip, 'ttl': 120})
-  print('[%s] Created %s with content %s' % (timestamp(), host, ip))
-
-def update_dns_record(cf, zid, rid, host, ip):
-  cf.zones.dns_records.put(zid, rid, data = {'type': 'A', 'name': host, 'content': ip, 'ttl': 120})
-  print('[%s] Updated %s with content %s' % (timestamp(), host, ip))
-
-def upsert_dns_record(cf, zid, host):
-  ip = my_ip()
-
-  try:
-    rinf = get_record_info(cf, zid, host)
-    if rinf['content'] != ip:
-      update_dns_record(cf, zid, rinf['id'], host, ip)
-    else:
-      print('[%s] Host %s is already up to date with %s' % (timestamp(), host, ip))
-  except IndexError:
-    create_dns_record(cf, zid, host, ip)
-
-# arguments
-parser = argparse.ArgumentParser(
-  description = '''
-    Dynamic DNS script for updating a record with your machine's public IP address.
-    Supports Cloudflare DNS hosted zones.
-  ''',
-  epilog = '''
-    EMAIL and API_KEY may be read from environment as CLOUDFLARE_EMAIL and
-    CLOUDFLARE_API_KEY. They need to be specified as arguments only
-    when the environment variables are undefined or when they need to be
-    overridden.
-
-    If you specify the ZONE_ID as command line argument, dynflare saves on
-    Cloudflare API calls.
-  '''
-)
-parser.add_argument(
-  '--host',
-  dest = 'host',
-  type = str,
-  help = 'DNS hostname to update.',
-  required = True
-)
-parser.add_argument(
-  '--zone-id',
-  dest = 'zone_id',
-  type = str,
-  help = 'Cloudflare Zone ID'
-)
-parser.add_argument(
-  '--email',
-  dest = 'email',
-  type = str,
-  help = 'Cloudflare email address. Only required for global API key.'
-)
-parser.add_argument(
-  '--api-key',
-  dest = 'api_key',
-  type = str,
-  help = 'Cloudflare API key or API token.'
-)
-parser.add_argument(
-  '--conf',
-  dest = 'conf',
-  type = str,
-  help = ('Configuration file containing email + key or token using same syntax as '
-  'the Certbot Cloudflare plug-in.')
-)
-args = parser.parse_args()
-
-# implementation
-if args.conf:
   cfg = ConfigParser()
-  with open(os.path.expanduser(args.conf)) as stream:
+  with open(os.path.expanduser(conf_certbot)) as stream:
     # workaround ConfigParser's deficiency
     stream = StringIO(u'[default]\n' + stream.read())
     try:
@@ -147,24 +51,167 @@ if args.conf:
     except NoOptionError:
       sys.exit('Fatal: invalid config file. Expecting email + key or token!')
 
-email = os.environ.get('CLOUDFLARE_EMAIL')
-email = args.email if type(args.email) is not type(None) else email
+def get_conf_acmesh(conf_acmesh):
+  if type(conf_acmesh) is type(None):
+    return
 
-if type(email) is not type(None):
-  os.environ['CLOUDFLARE_EMAIL'] = email
+def set_email(email):
+  em = os.environ.get('CLOUDFLARE_EMAIL')
+  em = email if type(email) is not type(None) else em
 
-api_key = os.environ.get('CLOUDFLARE_API_KEY')
-api_key = args.api_key if type(args.api_key) is not type(None) else api_key
+  if type(em) is not type(None):
+    os.environ['CLOUDFLARE_EMAIL'] = em
 
-if type(api_key) is type(None):
-  sys.exit('Fatal: you must specify at least an API token!')
+def set_api_key(api_key):
+  ak = os.environ.get('CLOUDFLARE_API_KEY')
+  ak = api_key if type(api_key) is not type(None) else ak
 
-os.environ['CLOUDFLARE_API_KEY'] = api_key
+  if type(ak) is type(None):
+    sys.exit('Fatal: you must specify at least an API token!')
 
-cf = CloudFlare.CloudFlare()
+  os.environ['CLOUDFLARE_API_KEY'] = ak
 
-zone_id = args.zone_id
-if type(zone_id) is type(None):
-  zone_id = get_zone_id(cf, PublicSuffixList().get_public_suffix(args.host))
+def query_dns(host, resolvers, type):
+  resolver = random.choice(resolvers.split(','))
+  try:
+    question = DNSRecord.question(host, type.upper()).send(resolver, 53, False, 5)
+    return DNSRecord.parse(question).short().split('\n')
+  except:
+    sys.exit('[%s] DNS query error. Check: dig +time=5 +tries=1 %s @%s %s' % (timestamp(), type, resolver, host))
 
-upsert_dns_record(cf, zone_id, args.host)
+def get_my_ip(host, resolvers, type):
+  result = query_dns(host, resolvers, type)[0]
+  # strip unwanted chars that may result from TXT records
+  return re.sub('[^0-9a-fA-F.:]', '', result)
+
+def get_record_info(cf, zid, host, type):
+  record_info = cf.zones.dns_records.get(zid, params = {'name': host, 'type': type})
+  return record_info[0]
+
+def create_dns_record(cf, zid, host, type, ttl, ip):
+  cf.zones.dns_records.post(zid, data = {'type': type, 'name': host, 'content': ip, 'ttl': ttl})
+  print('[%s] Created %s with content %s' % (timestamp(), host, ip))
+
+def update_dns_record(cf, zid, host, type, ttl, ip):
+  rinf = get_record_info(cf, zid, host, type)
+  rid = rinf['id']
+
+  cf.zones.dns_records.put(zid, rid, data = {'type': type, 'name': host, 'content': ip, 'ttl': ttl})
+  print('[%s] Updated %s with content %s' % (timestamp(), host, ip))
+
+def upsert_dns_record(zid, host, type, ttl, my_ip, cf_ip):
+  cf = CloudFlare.CloudFlare()
+  type = type.upper()
+
+  if cf_ip == '':
+    create_dns_record(cf, zid, host, type, ttl, my_ip)
+  elif my_ip != cf_ip:
+    update_dns_record(cf, zid, host, type, ttl, my_ip)
+  else:
+    print('[%s] Host %s is already up to date with %s' % (timestamp(), host, my_ip))
+
+def get_args():
+  parser = argparse.ArgumentParser(
+  description = '''
+    Dynamic DNS script for updating a record with your machine's public IP address.
+    Supports Cloudflare DNS hosted zones.
+  ''',
+  epilog = '''
+    EMAIL and API_KEY may be read from environment as CLOUDFLARE_EMAIL and
+    CLOUDFLARE_API_KEY. They need to be specified as arguments only
+    when the environment variables are undefined or when they need to be
+    overridden.
+  '''
+  )
+  parser.add_argument(
+    '--host',
+    dest = 'host',
+    type = str,
+    help = 'DNS hostname to update.',
+    required = True
+  )
+  parser.add_argument(
+    '--zone-id',
+    dest = 'zone_id',
+    type = str,
+    help = 'Cloudflare Zone ID',
+    required = True
+  )
+  parser.add_argument(
+    '--email',
+    dest = 'email',
+    type = str,
+    help = 'Cloudflare email address. Only required for global API key.'
+  )
+  parser.add_argument(
+    '--api-key',
+    dest = 'api_key',
+    type = str,
+    help = 'Cloudflare API key or API token.'
+  )
+  parser.add_argument(
+    '--record-type',
+    dest = 'record_type',
+    type = str,
+    help = 'Cloudflare DNS zone record type',
+    default = 'A'
+  )
+  parser.add_argument(
+    '--ttl',
+    dest = 'ttl',
+    type = int,
+    help = 'Cloudflare DNS host record TTL',
+    default = 120
+  )
+  parser.add_argument(
+    '--conf-certbot',
+    dest = 'conf_certbot',
+    type = str,
+    help = ('Configuration file containing email + key or token using same syntax as '
+    'the Certbot Cloudflare plug-in.')
+  )
+  parser.add_argument(
+    '--conf-acmesh',
+    dest = 'conf_acmesh',
+    type = str,
+    help = ('Configuration file containing email + key or token using same syntax as '
+    'the acme.sh Cloudflare dnsapi.')
+  )
+  parser.add_argument(
+    '--dns-ip-host',
+    dest = 'dns_ip_host',
+    type = str,
+    help = 'The host value used for DNS based public IP detection',
+    default = 'myip.opendns.com'
+  )
+  parser.add_argument(
+    '--dns-ip-resolvers',
+    dest = 'dns_ip_resolvers',
+    type = str, # extend action is Python 3
+    help = 'The comma separated list of resolvers used for DNS based public IP detection',
+    # resolver1.opendns.com, resolver2.opendns.com, resolver3.opendns.com, resolver4.opendns.com
+    default = '208.67.222.222,208.67.220.220,208.67.222.220,208.67.220.222'
+  )
+  parser.add_argument(
+    '--dns-ip-type',
+    dest = 'dns_ip_type',
+    type = str,
+    help = 'The DNS record type to resolve the public IP',
+    default = 'A'
+  )
+  return parser.parse_args()
+
+def main(args):
+  get_conf_certbot(args.conf_certbot)
+  get_conf_acmesh(args.conf_acmesh)
+  set_email(args.email)
+  set_api_key(args.api_key)
+
+  my_ip = get_my_ip(args.dns_ip_host, args.dns_ip_resolvers, args.dns_ip_type)
+  cf_ip = query_dns(args.host, '1.1.1.1,1.0.0.1', args.record_type)[0]
+
+  upsert_dns_record(args.zone_id, args.host, args.record_type, args.ttl, my_ip, cf_ip)
+
+# implementation
+if __name__ == '__main__':
+  main(get_args())

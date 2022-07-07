@@ -4,8 +4,10 @@
  * Supports Python 3 with Python 2 fallback.
  * Supports Cloudflare (scoped bearer) API tokens.
  * Adds output timestamps.
- * Add support for pre-filling Cloudflare Zone ID to save on API calls.
+ * Add required ZONE_ID argument to reduce API calls and remove publicsuffix2 dependency.
+ * Add support for acme.sh config file.
+ * Add support for DNS verification of target host record.
 
 ## v0.1
 
- * Initial release built on top of cfpy
+ * Initial release built on top of cfpy, dnslib, and publicsuffix2.

@@ -1,3 +1,2 @@
 dnslib
-publicsuffix2
 cloudflare
