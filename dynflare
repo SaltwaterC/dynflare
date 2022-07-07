@@ -30,30 +30,35 @@ class UTC(tzinfo):
 def timestamp():
   return datetime.now(UTC()).ctime()
 
-def get_conf_certbot(conf_certbot):
-  if type(conf_certbot) is type(None):
+def dequote(s):
+  if (s[0] == s[-1]) and s.startswith(("'", '"')):
+    return s[1:-1]
+  return s
+
+def read_conf_value(cfg, value):
+  return dequote(cfg.get('default', value))
+
+def get_conf_values(conf, token, email, key):
+  if type(conf) is type(None):
     return
 
   cfg = ConfigParser()
-  with open(os.path.expanduser(conf_certbot)) as stream:
+  with open(os.path.expanduser(conf)) as stream:
     # workaround ConfigParser's deficiency
     stream = StringIO(u'[default]\n' + stream.read())
     try:
       cfg.read_file(stream)
     except AttributeError: # Python 2 fallback
       cfg.readfp(stream)
+
   try:
-    os.environ['CLOUDFLARE_API_KEY'] = cfg.get('default', 'dns_cloudflare_api_token')
+    os.environ['CLOUDFLARE_API_KEY'] = read_conf_value(cfg, token)
   except NoOptionError:
     try:
-      os.environ['CLOUDFLARE_EMAIL'] = cfg.get('default', 'dns_cloudflare_email')
-      os.environ['CLOUDFLARE_API_KEY'] = cfg.get('default', 'dns_cloudflare_api_key')
+      os.environ['CLOUDFLARE_EMAIL'] = read_conf_value(cfg, email)
+      os.environ['CLOUDFLARE_API_KEY'] = read_conf_value(cfg, key)
     except NoOptionError:
       sys.exit('Fatal: invalid config file. Expecting email + key or token!')
-
-def get_conf_acmesh(conf_acmesh):
-  if type(conf_acmesh) is type(None):
-    return
 
 def set_email(email):
   em = os.environ.get('CLOUDFLARE_EMAIL')
@@ -202,8 +207,9 @@ def get_args():
   return parser.parse_args()
 
 def main(args):
-  get_conf_certbot(args.conf_certbot)
-  get_conf_acmesh(args.conf_acmesh)
+  get_conf_values(args.conf_certbot, 'dns_cloudflare_api_token', 'dns_cloudflare_email', 'dns_cloudflare_api_key')
+  get_conf_values(args.conf_acmesh, 'SAVED_CF_Token', 'SAVED_CF_Email', 'SAVED_CF_Key')
+
   set_email(args.email)
   set_api_key(args.api_key)
 
