@@ -1,17 +1,18 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # imports
-import argparse, os, sys, re, random, CloudFlare
-from dnslib import DNSRecord
+import argparse, os, sys, re, random, json
 from datetime import datetime, tzinfo, timedelta
 
 try:
   from configparser import ConfigParser, NoOptionError
   from io import StringIO
+  import urllib.request as urllib2
 except ImportError: # Python 2 fallback
   from ConfigParser import SafeConfigParser as ConfigParser
   from ConfigParser import NoOptionError
   from cStringIO import StringIO
+  import urllib2
 
 # classes
 # there's no datetime.timezone until Python 3.2
@@ -19,12 +20,23 @@ class UTC(tzinfo):
   '''UTC'''
   def utcoffset(self, dt):
     return timedelta(0)
-
   def tzname(self, dt):
     return 'UTC'
-
   def dst(self, dt):
     return timedelta(0)
+
+class MethodRequest(urllib2.Request):
+  def __init__(self, *args, **kwargs):
+    if 'method' in kwargs:
+      self._method = kwargs['method']
+      del kwargs['method']
+    else:
+      self._method = None
+    return urllib2.Request.__init__(self, *args, **kwargs)
+  def get_method(self, *args, **kwargs):
+    if self._method is not None:
+      return self._method
+    return urllib2.Request.get_method(self, *args, **kwargs)
 
 # functions
 def timestamp():
@@ -38,19 +50,20 @@ def dequote(s):
 def read_conf_value(cfg, value):
   return dequote(cfg.get('default', value))
 
+def read_conf(cfg, stream):
+  try:
+    cfg.read_file(stream)
+  except AttributeError: # Python 2 fallback
+    cfg.readfp(stream)
+
 def get_conf_values(conf, token, email, key):
   if type(conf) is type(None):
     return
-
   cfg = ConfigParser()
   with open(os.path.expanduser(conf)) as stream:
     # workaround ConfigParser's deficiency
     stream = StringIO(u'[default]\n' + stream.read())
-    try:
-      cfg.read_file(stream)
-    except AttributeError: # Python 2 fallback
-      cfg.readfp(stream)
-
+    read_conf(cfg, stream)
   try:
     os.environ['CLOUDFLARE_API_KEY'] = read_conf_value(cfg, token)
   except NoOptionError:
@@ -63,55 +76,108 @@ def get_conf_values(conf, token, email, key):
 def set_email(email):
   em = os.environ.get('CLOUDFLARE_EMAIL')
   em = email if type(email) is not type(None) else em
-
   if type(em) is not type(None):
     os.environ['CLOUDFLARE_EMAIL'] = em
 
 def set_api_key(api_key):
   ak = os.environ.get('CLOUDFLARE_API_KEY')
   ak = api_key if type(api_key) is not type(None) else ak
-
   if type(ak) is type(None):
     sys.exit('Fatal: you must specify at least an API token!')
-
   os.environ['CLOUDFLARE_API_KEY'] = ak
 
-def query_dns(host, resolvers, type):
-  resolver = random.choice(resolvers.split(','))
+def get_cf_ip(name, type):
+  headers = { 'accept': 'application/dns-json' }
+  url = 'https://cloudflare-dns.com/dns-query?name=' + name + '&type=' + type
+  res = http_request(url, headers)
+  record = json.loads(res)
+  if record['Status'] != 0:
+    return ''
   try:
-    question = DNSRecord.question(host, type.upper()).send(resolver, 53, False, 5)
-    return DNSRecord.parse(question).short().split('\n')
+    return record['Answer'][0]['data']
   except:
-    sys.exit('[%s] DNS query error. Check: dig +time=5 +tries=1 %s @%s %s' % (timestamp(), type, resolver, host))
+    return ''
 
-def get_my_ip(host, resolvers, type):
-  result = query_dns(host, resolvers, type)[0]
-  # strip unwanted chars that may result from TXT records
-  return re.sub('[^0-9a-fA-F.:]', '', result)
+def get_my_ip():
+  cfg = ConfigParser()
+  cf_trace = http_request('https://cloudflare.com/cdn-cgi/trace')
+  stream = StringIO(u'[default]\n' + cf_trace)
+  read_conf(cfg, stream)
+  return read_conf_value(cfg, 'ip')
 
-def get_record_info(cf, zid, host, type):
-  record_info = cf.zones.dns_records.get(zid, params = {'name': host, 'type': type})
-  return record_info[0]
+def http_request(url, headers = {}, method = 'GET', data=b''):
+  method = method.upper()
+  try:
+    if method == 'GET':
+      req = urllib2.Request(url=url, headers=headers)
+    else:
+      req = MethodRequest(url=url, headers=headers, data=data, method=method)
+    res = urllib2.urlopen(req)
+    res_body = res.read()
+    return res_body.decode('utf-8')
+  except Exception as err:
+    sys.exit('[%s] %s request to %s responded with %s' % (timestamp(), method, url, err))
 
-def create_dns_record(cf, zid, host, type, ttl, ip):
-  cf.zones.dns_records.post(zid, data = {'type': type, 'name': host, 'content': ip, 'ttl': ttl})
+def get_cloudflare_api_url():
+  return 'https://api.cloudflare.com/client/v4/'
+
+def get_cloudflare_headers():
+  try:
+    return {
+      'x-auth-email': os.environ['CLOUDFLARE_EMAIL'],
+      'x-auth-key': os.environ['CLOUDFLARE_API_KEY'],
+      'content-type': 'application/json'
+    }
+  except:
+    return {
+      'Authorization': 'Bearer ' + os.environ['CLOUDFLARE_API_KEY'],
+      'content-type': 'application/json'
+    }
+
+def zones_dns_records(zid):
+  return get_cloudflare_api_url() + 'zones/' + zid + '/dns_records'
+
+def zones_dns_record(zid, rid):
+  return zones_dns_records(zid) + '/' + rid
+
+def get_record_info(zid, host, type):
+  url = zones_dns_records(zid) + '?name=' + host + '&type' + type
+  req = http_request(url, get_cloudflare_headers())
+  record_info = json.loads(req)
+  return record_info['result'][0]
+
+def json_encode(dict):
+  return json.dumps(dict).encode('utf-8')
+
+def create_dns_record(zid, host, type, ttl, ip):
+  url = zones_dns_records(zid)
+  data = {
+    'name': host,
+    'type': type,
+    'content': ip,
+    'ttl': ttl
+  }
+  http_request(url, get_cloudflare_headers(), 'post', json_encode(data))
   print('[%s] Created %s with content %s' % (timestamp(), host, ip))
 
-def update_dns_record(cf, zid, host, type, ttl, ip):
-  rinf = get_record_info(cf, zid, host, type)
+def update_dns_record(zid, host, type, ttl, ip):
+  rinf = get_record_info(zid, host, type)
   rid = rinf['id']
-
-  cf.zones.dns_records.put(zid, rid, data = {'type': type, 'name': host, 'content': ip, 'ttl': ttl})
+  url = zones_dns_record(zid, rid)
+  data = {
+    'type': type,
+    'content': ip,
+    'ttl': ttl
+  }
+  http_request(url, get_cloudflare_headers(), 'patch', json_encode(data))
   print('[%s] Updated %s with content %s' % (timestamp(), host, ip))
 
 def upsert_dns_record(zid, host, type, ttl, my_ip, cf_ip):
-  cf = CloudFlare.CloudFlare()
   type = type.upper()
-
   if cf_ip == '':
-    create_dns_record(cf, zid, host, type, ttl, my_ip)
+    create_dns_record(zid, host, type, ttl, my_ip)
   elif my_ip != cf_ip:
-    update_dns_record(cf, zid, host, type, ttl, my_ip)
+    update_dns_record(zid, host, type, ttl, my_ip)
   else:
     print('[%s] Host %s is already up to date with %s' % (timestamp(), host, my_ip))
 
@@ -166,7 +232,7 @@ def get_args():
     dest = 'ttl',
     type = int,
     help = 'Cloudflare DNS host record TTL',
-    default = 120
+    default = 60
   )
   parser.add_argument(
     '--conf-certbot',
@@ -182,40 +248,15 @@ def get_args():
     help = ('Configuration file containing email + key or token using same syntax as '
     'the acme.sh Cloudflare dnsapi.')
   )
-  parser.add_argument(
-    '--dns-ip-host',
-    dest = 'dns_ip_host',
-    type = str,
-    help = 'The host value used for DNS based public IP detection',
-    default = 'myip.opendns.com'
-  )
-  parser.add_argument(
-    '--dns-ip-resolvers',
-    dest = 'dns_ip_resolvers',
-    type = str, # extend action is Python 3
-    help = 'The comma separated list of resolvers used for DNS based public IP detection',
-    # resolver1.opendns.com, resolver2.opendns.com, resolver3.opendns.com, resolver4.opendns.com
-    default = '208.67.222.222,208.67.220.220,208.67.222.220,208.67.220.222'
-  )
-  parser.add_argument(
-    '--dns-ip-type',
-    dest = 'dns_ip_type',
-    type = str,
-    help = 'The DNS record type to resolve the public IP',
-    default = 'A'
-  )
   return parser.parse_args()
 
 def main(args):
   get_conf_values(args.conf_certbot, 'dns_cloudflare_api_token', 'dns_cloudflare_email', 'dns_cloudflare_api_key')
   get_conf_values(args.conf_acmesh, 'SAVED_CF_Token', 'SAVED_CF_Email', 'SAVED_CF_Key')
-
   set_email(args.email)
   set_api_key(args.api_key)
-
-  my_ip = get_my_ip(args.dns_ip_host, args.dns_ip_resolvers, args.dns_ip_type)
-  cf_ip = query_dns(args.host, '1.1.1.1,1.0.0.1', args.record_type)[0]
-
+  my_ip = get_my_ip()
+  cf_ip = get_cf_ip(args.host, args.record_type)
   upsert_dns_record(args.zone_id, args.host, args.record_type, args.ttl, my_ip, cf_ip)
 
 # implementation
